@@ -1211,11 +1211,95 @@
       document.getElementById('map').innerHTML = '<div class="map-fallback"><div><strong>互动地图初始化失败</strong><p>地图引擎已经内嵌；若仍看到此提示，请确认文件下载完整，并在Safari或Edge中重新打开。高德中文底图和道路路线需要联网。</p><a class="btn ghost" href="https://uri.amap.com/search?keyword=S101天山地理画廊&view=map&src=xinjiang-roadbook" target="_blank" rel="noopener">在高德查看路线区域</a></div></div>';
     }
 
-    document.querySelectorAll('#todo-list input[type="checkbox"], #supplies-list input[type="checkbox"]').forEach((box) => {
+    const SYNC_REPO = 'soda-M/-';
+    const SYNC_FILE = 'checklist.json';
+    const SYNC_TOKEN = '__GITHUB_TOKEN__';
+    const SYNC_POLL_MS = 15000;
+
+    const syncedBoxes = document.querySelectorAll('#todo-list input[type="checkbox"], #supplies-list input[type="checkbox"]');
+    const syncState = {};
+    const syncPending = {};
+    let syncTimer = null;
+
+    function syncHeaders() {
+      return { 'Authorization': 'Bearer ' + SYNC_TOKEN, 'Accept': 'application/vnd.github+json' };
+    }
+
+    function syncUrl() {
+      return 'https://api.github.com/repos/' + SYNC_REPO + '/contents/' + SYNC_FILE;
+    }
+
+    function syncDecode(content) {
+      try { return JSON.parse(decodeURIComponent(escape(atob(content)))); } catch (e) { return {}; }
+    }
+
+    function syncEncode(obj) {
+      return btoa(unescape(encodeURIComponent(JSON.stringify(obj))));
+    }
+
+    function syncApplyToUi() {
+      syncedBoxes.forEach((box) => { box.checked = !!syncState[box.id]; });
+    }
+
+    async function syncRead() {
+      const response = await fetch(syncUrl(), { headers: syncHeaders() });
+      if (response.status === 404) return {};
+      if (!response.ok) throw new Error('GET ' + response.status);
+      return syncDecode((await response.json()).content);
+    }
+
+    async function syncWrite() {
+      if (!Object.keys(syncPending).length) return;
+      let info = null;
+      try {
+        const response = await fetch(syncUrl(), { headers: syncHeaders() });
+        if (response.status === 404) info = null;
+        else if (response.ok) info = await response.json();
+        else throw new Error('GET ' + response.status);
+      } catch (error) { console.warn('同步读取失败', error); return; }
+      const merged = info ? syncDecode(info.content) : {};
+      Object.assign(merged, syncPending);
+      const body = { message: 'sync checklist', content: syncEncode(merged) };
+      if (info) body.sha = info.sha;
+      try {
+        const response = await fetch(syncUrl(), {
+          method: 'PUT',
+          headers: Object.assign(syncHeaders(), { 'Content-Type': 'application/json' }),
+          body: JSON.stringify(body)
+        });
+        if (!response.ok) throw new Error('PUT ' + response.status);
+        Object.keys(syncPending).forEach((id) => delete syncPending[id]);
+      } catch (error) { console.warn('同步写入失败', error); }
+    }
+
+    async function syncPoll() {
+      try {
+        const server = await syncRead();
+        Object.keys(server).forEach((id) => {
+          if (!(id in syncState) || syncState[id] !== server[id]) {
+            syncState[id] = !!server[id];
+          }
+        });
+        syncApplyToUi();
+      } catch (error) { console.warn('同步拉取失败', error); }
+      if (Object.keys(syncPending).length) syncWrite();
+    }
+
+    syncedBoxes.forEach((box) => {
       const key = 'xj-roadbook-v2-' + box.id;
       box.checked = localStorage.getItem(key) === '1';
-      box.addEventListener('change', () => localStorage.setItem(key, box.checked ? '1' : '0'));
+      syncState[box.id] = box.checked;
+      box.addEventListener('change', () => {
+        syncState[box.id] = box.checked;
+        syncPending[box.id] = box.checked;
+        try { localStorage.setItem(key, box.checked ? '1' : '0'); } catch (error) {}
+        clearTimeout(syncTimer);
+        syncTimer = setTimeout(syncWrite, 1000);
+      });
     });
+
+    syncPoll();
+    setInterval(syncPoll, SYNC_POLL_MS);
 
     const d1SummaryText = {
       blocked:{title:'杭州 → 乌鲁木齐 → 地理中心折返 → 百里丹霞 → 肯斯瓦特', copy:'B方案：不穿越阻断段，走G30五工台大绕行。', km:'约253 km', drive:'纯驾驶约4.4h'},
